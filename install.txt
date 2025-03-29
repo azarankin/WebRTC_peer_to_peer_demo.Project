@@ -1,0 +1,3 @@
+# pip install flask flask-socketio eventlet
+# python server.py
+# ngrok http 5000

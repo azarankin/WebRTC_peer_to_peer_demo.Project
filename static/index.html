@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Auto Re-Join on Media Change</title>
+  <style>
+    video { width: 45%; margin: 10px; }
+    #logs {
+      background: #f4f4f4; padding: 10px; margin: 10px;
+      height: 160px; overflow: auto; border:1px solid #ccc;
+    }
+    #controls { margin: 10px; }
+    select, button { margin: 5px; padding: 5px; }
+  </style>
+</head>
+<body>
+<h2>WebRTC: Auto Re-Join on Media Change (Sender)</h2>
+
+<div id="controls">
+  <label><strong>Role:</strong></label>
+  <select id="roleSelect">
+    <option value="sender">Sender</option>
+    <option value="receiver">Receiver</option>
+  </select>
+  <button id="joinBtn">Join Room</button>
+  <br/>
+
+  <label><strong>Media Source (Sender Only):</strong></label>
+  <select id="mediaSelect">
+    <option value="webcam">Webcam</option>
+    <option value="file">Local File</option>
+  </select>
+  <input type="file" id="videoFile" accept="video/*" style="display:none;" />
+</div>
+
+<div>
+  <video id="localVideo" muted autoplay controls></video>
+  <video id="remoteVideo" autoplay controls></video>
+</div>
+
+<div id="logs"></div>
+
+<!-- Socket.IO -->
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4/dist/socket.io.min.js"></script>
+<script>
+const logDiv      = document.getElementById("logs");
+const joinBtn     = document.getElementById("joinBtn");
+const roleSelect  = document.getElementById("roleSelect");
+const mediaSelect = document.getElementById("mediaSelect");
+const videoFile   = document.getElementById("videoFile");
+const localVideo  = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
+
+let role = "sender";
+let localStream = null;
+let pc = null;
+
+// ICE / STUN / TURN
+const servers = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    }
+  ]
+};
+
+const socket = io.connect(window.location.origin);
+
+function log(msg) {
+  console.log(msg);
+  logDiv.innerHTML += `<p>${msg}</p>`;
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+// 1) Join the single "my_room"
+joinBtn.onclick = () => {
+  role = roleSelect.value;
+  log(`Joining as ${role}...`);
+  resetPeerConnection(); 
+  socket.emit("join", { role });
+  if(role === "sender" && mediaSelect.value === "webcam") {
+    getWebcam();
+  }
+};
+
+// 2) Media selection
+mediaSelect.onchange = () => {
+  if(mediaSelect.value === "file") {
+    videoFile.style.display = "inline-block";
+  } else {
+    videoFile.style.display = "none";
+    // If I'm sender and switch to "webcam"
+    if(role === "sender") {
+      // Re-join the room to reset ephemeral state
+      socket.emit("join", { role: "sender" });
+      log("Re-joined as sender, switching to webcam...");
+      resetPeerConnection();
+      getWebcam();
+    }
+  }
+};
+
+// 3) Local file
+videoFile.onchange = (evt) => {
+  const file = evt.target.files[0];
+  if(!file) return;
+  // Re-join with sender role
+  socket.emit("join", { role: "sender" });
+  log("Re-joined as sender with local file source...");
+  resetPeerConnection();
+
+  let url = URL.createObjectURL(file);
+  localVideo.src = url;
+  localVideo.play().then(() => {
+    captureFileStream(localVideo);
+  }).catch(err => {
+    log("Failed to autoplay file: " + err);
+  });
+};
+
+function captureFileStream(videoElem) {
+  if(videoElem.captureStream) {
+    localStream = videoElem.captureStream();
+  } else if(videoElem.mozCaptureStream) {
+    localStream = videoElem.mozCaptureStream();
+  } else {
+    log("captureStream() not supported.");
+    return;
+  }
+  log("Using local file as sender media.");
+  ensurePeerConnection();
+  createOfferIfSender();
+}
+
+// 4) Webcam
+async function getWebcam() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    localVideo.srcObject = localStream;
+    log("Got webcam stream.");
+    ensurePeerConnection();
+    createOfferIfSender();
+  } catch(e) {
+    log("Error getting webcam: " + e);
+  }
+}
+
+// 5) PeerConnection
+function ensurePeerConnection() {
+  if(!pc) {
+    pc = new RTCPeerConnection(servers);
+    log("Created RTCPeerConnection.");
+
+    if(localStream) {
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+        log("Added local track: " + track.kind);
+      });
+    } else {
+      log("No local stream (maybe I'm receiver).");
+    }
+
+    pc.ontrack = evt => {
+      log("Got remote track!");
+      remoteVideo.srcObject = evt.streams[0];
+    };
+
+    pc.onicecandidate = evt => {
+      if(evt.candidate) {
+        socket.emit("candidate", { candidate: evt.candidate });
+        log("Sent ICE candidate.");
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      log("ICE Connection State: " + pc.iceConnectionState);
+    };
+  }
+}
+
+// 6) If I'm sender, create an offer
+async function createOfferIfSender() {
+  if(role === "sender" && pc) {
+    try {
+      let offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log("Created local offer, sending to server...");
+      socket.emit("offer", { sdp: offer });
+    } catch(err) {
+      log("Error creating offer: " + err);
+    }
+  }
+}
+
+// 7) Receiver: create an answer
+async function createAnswer(remoteOffer) {
+  ensurePeerConnection();
+  try {
+    await pc.setRemoteDescription(remoteOffer);
+    log("Set remote offer, creating answer...");
+    let answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    log("Created local answer, sending to server...");
+    socket.emit("answer", { sdp: answer });
+  } catch(err) {
+    log("Error creating answer: " + err);
+  }
+}
+
+// 8) Sender sets remote answer
+async function setRemoteAnswer(remoteAnswer) {
+  ensurePeerConnection();
+  try {
+    await pc.setRemoteDescription(remoteAnswer);
+    log("Set remote answer from receiver.");
+  } catch(err) {
+    log("Error setting remote answer: " + err);
+  }
+}
+
+// 9) Tear down old PeerConnection
+function resetPeerConnection() {
+  if(pc) {
+    pc.close();
+    pc = null;
+  }
+  localStream = null;
+  localVideo.srcObject = null;
+  remoteVideo.srcObject = null;
+  localVideo.removeAttribute('src');
+  localVideo.load();
+  log("Reset old PeerConnection & cleared local/remote videos.");
+}
+
+/****************************************
+ * Socket.IO Handlers
+ ****************************************/
+socket.on("joined_room", data => {
+  log(`Joined room: ${data.room} as ${data.role}`);
+});
+
+socket.on("offer", async data => {
+  if(role === "receiver") {
+    log("Got offer from sender, creating answer...");
+    await createAnswer(data.sdp);
+  } else {
+    log("Got offer, but I'm also sender? Ignoring...");
+  }
+});
+
+socket.on("answer", async data => {
+  if(role === "sender") {
+    log("Got answer from receiver, setting remote...");
+    await setRemoteAnswer(data.sdp);
+  } else {
+    log("Got answer, but I'm receiver? Ignoring...");
+  }
+});
+
+socket.on("candidate", async data => {
+  log("Got ICE candidate, adding...");
+  ensurePeerConnection();
+  try {
+    await pc.addIceCandidate(data.candidate);
+    log("Added ICE candidate.");
+  } catch(err) {
+    log("Error adding candidate: " + err);
+  }
+});
+</script>
+</body>
+</html>
