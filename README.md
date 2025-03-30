@@ -20,3 +20,25 @@
 2. **Install Dependencies**:
    ```bash
    pip install flask flask-socketio eventlet
+3. Run the Server:
+
+```
+python server.py
+```
+
+The server will run on http://localhost:5000.
+
+4. Open Two Browser Tabs:
+
+Tab 1 (Sender): Choose Sender → Join Room → Select your media (webcam or local file).
+
+Tab 2 (Receiver): Choose Receiver → Join Room.
+
+5. Test Media Switching:
+
+In the Sender tab, switch from one media source to another.
+
+The connection resets and the new media session is established automatically.
+
+Enjoy real-time communication using WebRTC with minimal manual configuration!
+
